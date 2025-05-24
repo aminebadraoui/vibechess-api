@@ -1,0 +1,25 @@
+# Environment variables
+.env
+
+# IDE files
+.idea/
+*.iml
+*.iws
+
+# Build files
+build/
+target/
+*.jar
+*.war
+
+# Log files
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Spring Boot
+application-local.properties
+application-dev.properties 
