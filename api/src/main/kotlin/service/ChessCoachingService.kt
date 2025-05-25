@@ -69,42 +69,60 @@ class ChessCoachingService(
             else -> "Unknown"
         }
 
-        val promptText = """
-            You are an expert chess coach helping a player during their game. 
-
-            Player Information:
-            - ELO Rating: ${userInfo.elo ?: "Unknown"}
-            - Playing as: $userColor
-            - Skill Level: $skillLevel
-            - Current Move Number: $moveNumber
-
-            Game Moves So Far: "$moves"
-
-            Your task is to:
-            1. Use the chess analysis tool to analyze the current position from these moves
-            2. Use analysis depth of $analysisDepth for this player's skill level
-            3. Based on the analysis, provide specific coaching advice
-
-            For the coaching advice, please:
-            - Suggest the best move and explain why
-            - Tailor the explanation to the player's skill level ($skillLevel)
-            - For beginners: Focus on basic principles, safety, piece development
-            - For intermediate: Include positional concepts and tactical awareness  
-            - For advanced: Discuss deeper strategy and complex calculations
-
-            IMPORTANT CHESS EDUCATION GUIDELINES:
+        // System prompt - defines the AI's role and behavior
+        val systemPrompt = """
+            You are an expert chess coach helping players improve their game. Your coaching style should be:
+            
+            COACHING PRINCIPLES:
+            - Engaging and educational - make chess exciting!
+            - Tailored to skill level (beginner/intermediate/advanced)
+            - Use proper chess terminology and opening names when applicable
+            - Focus on WHY moves are good, not just WHAT to play
+            
+            CHESS EDUCATION GUIDELINES:
             - Identify famous openings when possible (Queen's Gambit, Sicilian Defense, Italian Game, etc.)
             - Use engaging chess terminology: "controls the long diagonal", "develops with tempo", "centralizes the knight"
             - Mention strategic themes: piece development, king safety, pawn breaks, space advantage
             - For beginners: Explain WHY moves are good in simple terms
             - For higher ELO: Include deeper strategic concepts and opening theory
+            
+            COMMON OPENING PATTERNS TO RECOGNIZE:
+            - d4 d5 c4 = Queen's Gambit ("offering a pawn for central control and rapid development")
+            - e4 e5 Nf3 = King's Pawn Game ("classical development fighting for the center")
+            - e4 c5 = Sicilian Defense ("Black's most ambitious defense, fighting for counterplay")
+            - d4 Nf6 = Indian Defense systems ("hypermodern approach, controlling center from afar")
+            
+            ANALYSIS APPROACH:
+            1. Use the chess analysis tool to analyze the current position from the given moves
+            2. Provide specific move recommendations based on the analysis
+            3. Explain the reasoning appropriate to the player's skill level
+            
+            Always make your coaching engaging and educational!
+        """.trimIndent()
 
-            Make your coaching engaging and educational! Use the analysis tool to get accurate position evaluation and move recommendations.
+        // User prompt - contains specific player data and request
+        val userPrompt = """
+            Please analyze this chess position and provide coaching advice.
+            
+            Player Information:
+            - ELO Rating: ${userInfo.elo ?: "Unknown"}
+            - Playing as: $userColor
+            - Skill Level: $skillLevel
+            - Current Move Number: $moveNumber
+            
+            Game Moves So Far: "$moves"
+            
+            Instructions:
+            - Use analysis depth of $analysisDepth for this player's skill level
+            - Provide specific coaching advice tailored to $skillLevel level
+            - Suggest the best move and explain why it's good
+            - Make the explanation engaging and educational
         """.trimIndent()
 
         return try {
             val response = clientWithTool.prompt()
-                .user(promptText)
+                .system(systemPrompt)
+                .user(userPrompt)
                 .call()
                 .content()
             
@@ -164,14 +182,26 @@ class ChessCoachingService(
      * Extract user info with structured output using Spring AI's BeanOutputConverter
      */
     suspend fun getUserInfoStructured(screenshot: MultipartFile): UserInfo {
-        val promptText = """
-            You are a vision system specialized in parsing Chess.com interfaces. Analyze the screenshot and extract user information.
-
+        val systemPrompt = """
+            You are a vision system specialized in parsing Chess.com interfaces. 
+            
+            Your job is to extract user information from chess game screenshots with high accuracy.
+            
             Rules:
             - Determine user color from board orientation (user typically at bottom)
             - Extract ELO rating from username area
             - If ELO is unclear or unreadable, set to null
             - Assess confidence levels based on image clarity
+            - Only use what is visible in the image - do not guess or infer
+        """.trimIndent()
+
+        val userPrompt = """
+            Analyze this Chess.com game screenshot and extract the user information.
+            
+            Please identify:
+            1. User's color (White/Black) based on board orientation
+            2. User's ELO rating from the visible interface
+            3. Confidence levels for both pieces of information
         """.trimIndent()
 
         val mimeType = MimeTypeUtils.parseMimeType(screenshot.contentType ?: "image/png")
@@ -185,8 +215,9 @@ class ChessCoachingService(
         return try {
             // Use Spring AI's structured output capability
             val result = chatClient.prompt()
+                .system(systemPrompt)
                 .user { userMessageBuilder ->
-                    userMessageBuilder.text(promptText).media(media)
+                    userMessageBuilder.text(userPrompt).media(media)
                 }
                 .options(options)
                 .call()
@@ -196,39 +227,6 @@ class ChessCoachingService(
         } catch (e: Exception) {
             println("Error parsing user info: ${e.message}")
             UserInfo(color = "Uncertain", elo = null)
-        }
-    }
-
-    /**
-     * Generate move advice using the chess position and tools for analysis
-     */
-    suspend fun getAdviceWithTools(userInfo: String?, fen: String?): String? {
-        val promptText = """
-            You are a real-time chess coach helping a player during their game.
-            
-            Player Info: $userInfo
-            Current Position FEN: $fen
-            
-            First, analyze the position to understand what's happening on the board.
-            Then, give advice that's appropriate for the player's skill level.
-            Your response should be conversational and encouraging, with specific advice for the next move.
-        """.trimIndent()
-
-        // Create a chat client with the ChessApiTool
-        val clientWithTool = builder
-            .defaultTools(chessApiTool)
-            .build()
-
-        val userMessage = UserMessage.builder().text(promptText).build()
-        val options = OpenAiChatOptions.builder()
-            .model("gpt-4o")
-            .build()
-        val prompt = Prompt(userMessage, options)
-
-        return try {
-            clientWithTool.prompt(prompt).call().content()
-        } catch (e: Exception) {
-            "Unable to generate advice at this time: ${e.message}"
         }
     }
 
