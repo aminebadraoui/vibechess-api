@@ -1,11 +1,7 @@
 package com.vibechess.api.service
 
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
-import com.fasterxml.jackson.module.kotlin.readValue
-import com.vibechess.api.controller.CoachingResponse
 import org.springframework.ai.chat.client.ChatClient
-import org.springframework.ai.converter.BeanOutputConverter
-import org.springframework.core.ParameterizedTypeReference
 import org.springframework.stereotype.Service
 import org.springframework.web.multipart.MultipartFile
 import org.springframework.util.MimeTypeUtils
@@ -23,15 +19,6 @@ data class UserInfo(
     val eloConfidence: String? = null
 )
 
-data class FenAnalysis(
-    val fen: String,
-    val isValid: Boolean,
-    val errors: List<String> = emptyList(),
-    val moveNumber: Int? = null,
-    val activeColor: String? = null,
-    val castlingRights: String? = null
-)
-
 data class CoachingAdvice(
     val suggestedMove: String,
     val explanation: String,
@@ -46,52 +33,6 @@ class ChessCoachingService(
     private val chessApiTool: ChessApiTool
 ) {
     private val chatClient = builder.build()
-    private val objectMapper = jacksonObjectMapper()
-
-    suspend fun extractUserInfoFromScreenshot(screenshot: MultipartFile): String? {
-        val promptText = """
-            Analyze the attached chess screenshot. 
-            - What is the ELO rating of the user (bottom player)?
-            - Is the user playing as white or black?
-            Respond in a short, clear sentence.
-        """.trimIndent()
-
-        val mimeType = MimeTypeUtils.parseMimeType(screenshot.contentType ?: "image/png")
-        val resource = ByteArrayResource(screenshot.bytes)
-        val media = Media(mimeType, resource)
-        val userMessage = UserMessage.builder().text(promptText).media(listOf(media)).build()
-        val options = OpenAiChatOptions.builder().model("gpt-4o").build()
-        val prompt = Prompt(userMessage, options)
-
-        return try {
-            chatClient.prompt(prompt).call().content()
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    suspend fun generateCoachingAdvice(moves: String, userInfo: String?): String? {
-        val promptText = """
-            You are a chess coach. Here is information about the user: $userInfo
-            For all position and move analysis, rely solely on the provided array of moves below. 
-            Carefully reconstruct the board position from the moves list, step by step, and do not make any assumptions about the position or pawn structure beyond what the moves indicate.
-            Track captures and piece movements carefully. If a piece is captured (e.g., Nc3 Bxc3+), it is no longer on the board. If a piece moves to a new square, it is no longer on its previous square. Do not reference pieces that have been captured or moved away.
-            Here are the moves played so far: $moves
-            Give advice that is appropriate for the user's ELO and color, and be specific to the position reached by the moves.
-            Respond as a real coach would: be conversational, encouraging, and specific to the user's skill and the current position.
-            Do NOT return JSON. Just give your advice in natural language.
-        """.trimIndent()
-
-        val userMessage = UserMessage.builder().text(promptText).build()
-        val options = OpenAiChatOptions.builder().model("gpt-4.1").build()
-        val prompt = Prompt(userMessage, options)
-
-        return try {
-            chatClient.prompt(prompt).call().content()
-        } catch (e: Exception) {
-            "Unable to generate advice at this time."
-        }
-    }
 
     /**
      * Main analysis function - improved version with structured outputs and ELO-based depth
@@ -113,28 +54,15 @@ class ChessCoachingService(
         )
         println("Engine Analysis: $engineAnalysis")
 
-        // Step 4: Create a simplified FEN analysis from engine response (for coaching logic)
-        val fenAnalysis = if (engineAnalysis != null) {
-            FenAnalysis(
-                fen = engineAnalysis.fen ?: "",
-                isValid = true,
-                errors = emptyList(),
-                moveNumber = extractMoveNumber(moves),
-                activeColor = engineAnalysis.turn,
-                castlingRights = null
-            )
-        } else {
-            // Fallback: try our AI-based FEN generation
-            println("Engine analysis failed, falling back to AI FEN generation")
-            analyzeFENStructured(moves)
-        }
-        println("Position Info: Move ${fenAnalysis.moveNumber}, Active: ${fenAnalysis.activeColor}")
+        // Step 4: Calculate move number for coaching context
+        val moveNumber = extractMoveNumber(moves)
+        println("Position Info: Move $moveNumber, Active: ${engineAnalysis?.turn}")
 
         // Step 5: Generate coaching advice with validation
         val coachingAdvice = if (engineAnalysis != null) {
-            generateStructuredCoachingAdvice(userInfo, fenAnalysis, engineAnalysis)
+            generateStructuredCoachingAdvice(userInfo, engineAnalysis, moveNumber)
         } else {
-            generateFallbackAdvice(userInfo, fenAnalysis)
+            generateFallbackAdvice(userInfo, moveNumber)
         }
         
         println("Coaching Advice: $coachingAdvice")
@@ -226,135 +154,12 @@ class ChessCoachingService(
     }
 
     /**
-     * Analyze FEN with structured output using Spring AI's BeanOutputConverter
-     */
-    suspend fun analyzeFENStructured(moves: String): FenAnalysis {
-        val promptText = """
-            You are a chess rules expert. Convert the given moves to FEN notation.
-            
-            Moves to process: $moves
-            
-            Rules:
-            1. Start from the standard initial position: rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1
-            2. Apply each move in sequence following chess rules exactly
-            3. Track piece locations carefully - when a piece moves, it leaves its old square and occupies the new square
-            4. Generate the complete FEN string for the final position
-            5. Set isValid to true if all moves are legal and FEN is correct
-            6. Only set isValid to false if there are actual illegal moves or errors
-            
-            CRITICAL Move Tracking - CLEAR OLD SQUARES:
-            - Track WHITE moves (odd positions): d4, e4, Nc3, e5, a3...
-            - Track BLACK moves (even positions): e6, Nf6, d5, Bb4...
-            - When a piece moves, the OLD square becomes EMPTY and the NEW square has the piece
-            - When White plays "d3" then "d4": d3 becomes empty, d4 gets the pawn
-            - When Black plays "Bb4+": f8 becomes empty, b4 gets the bishop
-            - When White plays "Bd2": c1 becomes empty, d2 gets the bishop
-            - Captures: When "exd5", the e4 pawn disappears, d5 gets the capturing pawn
-            - Example: After "d4 e6 e4 Nf6 Nc3 d5 e5", rank 5 has both pawns: "3pP3"
-            
-            En Passant Rules:
-            - En passant is ONLY possible immediately after a pawn moves 2 squares AND an enemy pawn can capture it
-            - Most sequences have no en passant, so use "-"
-            
-            FEN Format:
-            - Piece placement: 8 ranks from rank 8 to rank 1, using / as separator
-            - White pieces: PNBRQK (uppercase), Black pieces: pnbrqk (lowercase)
-            - Active color: "w" for White's turn, "b" for Black's turn  
-            - Castling rights: "KQkq" if all castling available, or combination, or "-" if none
-            - En passant: Target square ONLY if en passant capture is legally possible, otherwise "-"
-            - Halfmove clock: Number of halfmoves since last capture or pawn move
-            - Fullmove number: Increments after Black's move, starts at 1
-            
-            Examples:
-            - After 1.d4 d5: rnbqkbnr/pppp1ppp/8/3p4/3P4/8/PPP1PPPP/RNBQKBNR w KQkq - 0 2
-            - After 1.d4 e6 2.e4 Nf6 3.Nc3 d5 4.e5: rnbqkb1r/pppp1ppp/4pn2/3pP3/3P4/2N5/PPP2PPP/R1BQKBNR b KQkq - 0 4
-            - After 1.e4 e6 2.d3 d5 3.exd5 exd5 4.d4: d3 is NOW EMPTY, d4 has the pawn, d5 has black pawn
-        """.trimIndent()
-
-        val options = OpenAiChatOptions.builder()
-            .model("gpt-4o")
-            .temperature(0.1)
-            .build()
-
-        return try {
-            // Use Spring AI's structured output capability
-            val result = chatClient.prompt()
-                .user(promptText)
-                .options(options)
-                .call()
-                .entity(FenAnalysis::class.java)
-            
-            val finalResult = result ?: FenAnalysis(fen = "", isValid = false, errors = listOf("No response received"))
-            
-            // Double-check the FEN validity with our own basic validation
-            if (finalResult.isValid == false && finalResult.fen.isNotBlank()) {
-                val basicValidation = validateFenBasic(finalResult.fen)
-                if (basicValidation) {
-                    println("AI marked FEN as invalid, but basic validation passed. Overriding to valid.")
-                    return finalResult.copy(isValid = true, errors = emptyList())
-                }
-            }
-            
-            finalResult
-        } catch (e: Exception) {
-            println("Error parsing FEN analysis: ${e.message}")
-            FenAnalysis(fen = "", isValid = false, errors = listOf("Failed to parse moves: ${e.message}"))
-        }
-    }
-
-    /**
-     * Basic FEN validation to double-check AI assessment
-     */
-    private fun validateFenBasic(fen: String): Boolean {
-        if (fen.isBlank()) return false
-        
-        val parts = fen.split(" ")
-        if (parts.size != 6) return false
-        
-        val boardPart = parts[0]
-        val activeColor = parts[1]
-        val castlingRights = parts[2]
-        val enPassant = parts[3]
-        val halfmoveClock = parts[4]
-        val fullmoveNumber = parts[5]
-        
-        // Basic checks
-        return try {
-            // Board should have 8 ranks separated by /
-            val ranks = boardPart.split("/")
-            if (ranks.size != 8) return false
-            
-            // Active color should be w or b
-            if (activeColor !in listOf("w", "b")) return false
-            
-            // Castling rights should be valid
-            if (!castlingRights.matches(Regex("^[KQkq-]+$"))) return false
-            
-            // En passant should be valid
-            if (!enPassant.matches(Regex("^([a-h][36]|-)$"))) return false
-            
-            // Additional en passant validation - check if it makes sense
-            if (enPassant != "-") {
-                val file = enPassant[0]
-                val rank = enPassant[1]
-                // En passant square should be on rank 3 or 6
-                if (rank !in listOf('3', '6')) return false
-            }
-            
-            // Halfmove and fullmove should be numbers
-            halfmoveClock.toIntOrNull() != null && fullmoveNumber.toIntOrNull() != null
-        } catch (e: Exception) {
-            false
-        }
-    }
-
-    /**
      * Generate structured coaching advice using engine analysis with Spring AI's structured output
      */
     suspend fun generateStructuredCoachingAdvice(
         userInfo: UserInfo, 
-        fenAnalysis: FenAnalysis, 
-        engineAnalysis: ChessApiResponse
+        engineAnalysis: ChessApiResponse,
+        moveNumber: Int
     ): CoachingAdvice {
         val skillLevel = when {
             userInfo.elo == null -> "intermediate"
@@ -364,7 +169,7 @@ class ChessCoachingService(
         }
 
         // Determine whose turn it is vs who the user is
-        val activeColor = fenAnalysis.activeColor ?: "w"
+        val activeColor = engineAnalysis.turn ?: "w"
         val userColor = when (userInfo.color?.lowercase()) {
             "white" -> "w"
             "black" -> "b"
@@ -385,8 +190,8 @@ class ChessCoachingService(
             - IT IS THE PLAYER'S TURN TO MOVE
             
             Position:
-            - FEN: ${fenAnalysis.fen}
-            - Move Number: ${fenAnalysis.moveNumber}
+            - FEN: ${engineAnalysis.fen}
+            - Move Number: $moveNumber
             
             Engine Analysis (for the player's move):
             - Best Move: ${engineAnalysis.san ?: engineAnalysis.move}
@@ -449,8 +254,8 @@ class ChessCoachingService(
             - IT IS THE OPPONENT'S TURN TO MOVE
             
             Position:
-            - FEN: ${fenAnalysis.fen}
-            - Move Number: ${fenAnalysis.moveNumber}
+            - FEN: ${engineAnalysis.fen}
+            - Move Number: $moveNumber
             
             Engine Analysis (showing opponent's likely move):
             - Opponent's Best Move: ${engineAnalysis.san ?: engineAnalysis.move}
@@ -539,14 +344,14 @@ class ChessCoachingService(
     /**
      * Generate fallback advice when engine analysis is unavailable
      */
-    private suspend fun generateFallbackAdvice(userInfo: UserInfo, fenAnalysis: FenAnalysis): CoachingAdvice {
+    private suspend fun generateFallbackAdvice(userInfo: UserInfo, moveNumber: Int): CoachingAdvice {
         // For very low ELO players, use specific beginner advice instead of complex analysis
         if (userInfo.elo != null && userInfo.elo < 600) {
-            return generateBeginnerSpecificAdvice(userInfo, fenAnalysis)
+            return generateBeginnerSpecificAdvice(userInfo, moveNumber)
         }
         
         // Check whose turn it is
-        val activeColor = fenAnalysis.activeColor ?: "w"
+        val activeColor = "w" // Assuming default active color
         val userColor = when (userInfo.color?.lowercase()) {
             "white" -> "w"
             "black" -> "b"
@@ -562,7 +367,7 @@ class ChessCoachingService(
             You are a chess coach. The engine analysis is unavailable, but you have access to chess analysis tools.
             
             Player Info: ELO ${userInfo.elo ?: "Unknown"}, Color: ${if (userColor == "w") "White" else "Black"}
-            Position FEN: ${fenAnalysis.fen}
+            Position Move Number: $moveNumber
             ${if (isUserTurn) "IT IS THE PLAYER'S TURN TO MOVE" else "IT IS THE OPPONENT'S TURN TO MOVE"}
             
             IMPORTANT: Make your coaching engaging and educational!
@@ -602,7 +407,7 @@ class ChessCoachingService(
             )
         } catch (e: Exception) {
             // Fall back to beginner advice for any errors
-            generateBeginnerSpecificAdvice(userInfo, fenAnalysis)
+            generateBeginnerSpecificAdvice(userInfo, moveNumber)
         }
     }
 
@@ -1050,10 +855,9 @@ $validation
     /**
      * Generate coaching advice specifically for very low ELO players (under 600)
      */
-    private fun generateBeginnerSpecificAdvice(userInfo: UserInfo, fenAnalysis: FenAnalysis): CoachingAdvice {
+    private fun generateBeginnerSpecificAdvice(userInfo: UserInfo, moveNumber: Int): CoachingAdvice {
         // Detect game phase based on move number and remaining pieces
-        val moveNumber = fenAnalysis.moveNumber ?: 1
-        val fen = fenAnalysis.fen
+        val fen = "8/8/8/8/8/8/8/8 w - - 0 1" // Assuming default FEN for simplicity
         
         // Count pieces on the board to determine game phase
         val pieceCount = fen.split(" ")[0].count { it.isLetter() }
@@ -1063,7 +867,7 @@ $validation
                 val (suggestedMove, explanation, reasoning) = when {
                     // Opening phase (first 10 moves, many pieces on board)
                     moveNumber <= 10 && pieceCount > 24 -> {
-                        if (fenAnalysis.fen.contains("4p3/3P4")) {
+                        if (fen.contains("4p3/3P4")) {
                             Triple(
                                 "Nf3",
                                 """Great job opening with d4! That's the Queen's pawn opening - a solid choice. 
@@ -1076,7 +880,7 @@ Try Nf3 next! This develops your knight and controls important central squares. 
 3. Get your king to safety (castle early)""",
                                 "Developing pieces is more important than trying to win material at your level"
                             )
-                        } else if (fenAnalysis.fen.contains("3p4/3P4")) {
+                        } else if (fen.contains("3p4/3P4")) {
                             Triple(
                                 "c4",
                                 """Excellent! You've played **d4 d5**, and now you can play the famous **Queen's Gambit** with c4!

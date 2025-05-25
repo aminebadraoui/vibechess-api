@@ -1,5 +1,6 @@
 # Environment variables
 .env
+api/.env
 
 # IDE files
 .idea/
