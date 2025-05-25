@@ -1,23 +1,32 @@
-# VibechessAPI Chess Engine Integration
+# VibechessAPI Chess Coaching Engine
 
-This project integrates with [chess-api.com](https://chess-api.com/) to provide chess position analysis using Spring AI's tool calling capability and structured outputs.
+This project provides AI-powered chess coaching by analyzing chess positions from screenshots and game moves using Spring AI's tool calling capability and structured outputs.
 
 ## Architecture Overview
 
 The `ChessCoachingService` implements a comprehensive coaching system with the following flow:
 
 1. **User Info Extraction** - Analyze screenshot to determine user's ELO and color using Spring AI structured outputs
-2. **FEN Analysis** - Convert move notation to FEN with validation using structured outputs  
-3. **Engine Analysis** - Get chess engine analysis via chess-api.com with ELO-appropriate depth
-4. **Coaching Generation** - Create tailored coaching advice using the engine analysis
-5. **Response Formatting** - Format the final coaching message based on user skill level
+2. **Structured Coaching Analysis** - AI uses chess analysis tool automatically to provide comprehensive coaching
+3. **Adaptive Depth Analysis** - ELO-based analysis depth for appropriate complexity
+4. **Comprehensive Response** - Returns both best move and detailed coaching advice
 
 ## Key Features
 
-### Spring AI Structured Outputs
-- Uses Spring AI's `BeanOutputConverter` for reliable JSON parsing
-- Structured data models for `UserInfo`, `FenAnalysis`, and `CoachingAdvice`
-- Automatic format instruction generation and validation
+### Spring AI Structured Outputs & Tool Integration
+- Uses Spring AI's structured output capabilities for reliable `CoachingResult` parsing
+- Automatic chess analysis tool calling with `@Tool` annotations
+- Seamless integration between AI reasoning and chess engine analysis
+- Fixed tool registration conflicts for consistent performance
+
+### Enhanced Coaching Response Format
+The API now returns structured coaching data:
+```kotlin
+data class CoachingResult(
+    val bestMove: String?,      // Recommended move in algebraic notation
+    val advice: String          // Comprehensive coaching explanation
+)
+```
 
 ### ELO-Based Analysis Depth
 - **Beginners (< 800)**: Depth 8 - Simple analysis for basic concepts
@@ -26,32 +35,29 @@ The `ChessCoachingService` implements a comprehensive coaching system with the f
 - **Advanced (1600-2000)**: Depth 15 - Deep analysis
 - **Expert (2000+)**: Depth 18 - Maximum depth analysis
 
-### Game Phase Detection & Adaptive Coaching
-The system automatically detects the game phase and provides appropriate advice:
+### Comprehensive AI Coaching
+The system provides detailed, educational coaching that includes:
 
-#### **Opening Phase** (Moves 1-10, 24+ pieces)
-- Focus on development, center control, king safety
-- Specific opening principles and piece development
+#### **Position Evaluation**
+- Chess engine evaluation scores and win percentages
+- Position characteristics (opening/middlegame/endgame)
+- Strategic and tactical assessment
 
-#### **Middlegame** (Moves 11-25, 12+ pieces)
-- Tactical awareness and piece safety
-- Looking for hanging pieces and simple tactics
-- Piece improvement and coordination
+#### **Educational Content**
+- Multiple strategic concepts explained per response
+- Chess terminology and opening names when applicable
+- Skill-level appropriate explanations with examples
+- Threat awareness and tactical considerations
 
-#### **Endgame** (Move 25+, <12 pieces)
-- King activity and pawn promotion
-- Passed pawn creation and advancement
-- Simplified tactical themes
+#### **Game Phase Adaptive Advice**
+- **Opening Phase** (Moves 1-10): Development, center control, king safety
+- **Middlegame** (Moves 11-25): Tactical patterns, piece improvement, threats
+- **Endgame** (Move 25+): King activity, pawn promotion, simplified tactics
 
-### Robust Error Handling
-- **FEN Validation Override**: If AI incorrectly marks valid FEN as invalid, basic validation override ensures continuity
-- **Chess API Resilience**: Handles missing fields in API responses with fallback parsing
-- **Graceful Degradation**: Falls back to appropriate coaching based on game phase when engine analysis fails
-
-### Chess Tool Integration
-- Spring AI tool calling with `@Tool` annotations
-- Automatic function discovery and execution
-- Seamless integration with ChatGPT for move validation and coaching
+### Robust Tool Configuration
+- **Fixed Tool Registration**: Resolved "Multiple tools with the same name" conflicts
+- **Explicit Bean Configuration**: `ToolConfiguration` class manages tool registration
+- **Consistent Performance**: Tools work reliably across multiple requests
 
 ## API Endpoints
 
@@ -61,222 +67,158 @@ The system automatically detects the game phase and provides appropriate advice:
 POST /api/coach
 ```
 
-Analyzes a chess position from a screenshot and move history to provide personalized coaching.
+Analyzes a chess position from a screenshot and move history to provide personalized coaching with move recommendations.
 
 **Request:**
 - `screenshot` (multipart file): Screenshot of the chess position
 - `moves` (string): Move history in standard algebraic notation
 
-**Response Examples:**
-
-**Opening (350 ELO):**
+**Response Format:**
 ```json
 {
-  "advice": "Hi there! Suggested Move: Nf3\n\nGreat job opening with d4! That's the Queen's pawn opening - a solid choice...\n\n(Advice tailored for ~350 ELO)"
+  "bestMove": "Nf3",
+  "advice": "Comprehensive coaching explanation with multiple strategic concepts..."
 }
 ```
 
-**Endgame (350 ELO):**
+**Example Response (350 ELO, Opening):**
 ```json
 {
-  "advice": "Hi there! Suggested Move: Push passed pawns\n\nYou're in the endgame! This is where games are won and lost. Key endgame principles for beginners:\n\n1. King activity - Bring your king into the fight!\n2. Push passed pawns...\n\n(Advice tailored for ~350 ELO)"
+  "bestMove": "Nf3",
+  "advice": "Let's break down the current position and analyze it step by step, keeping in mind that you are a beginner with an ELO rating of 350.\n\n### Current Position Evaluation\n- **Score:** +0.25 (This indicates a roughly equal position with a slight advantage for White)\n- **Your Move Number:** 3\n- **Turn:** It's White's turn to move.\n\n### Best Move for White\nThe best move for you in this situation is **Nf3** (moving the knight from g1 to f3).\n\n### Why is Nf3 a Good Move?\n1. **Development**: Moving the knight to f3 helps to develop your pieces, which is crucial in the opening. Development means bringing your pieces out from their starting positions to more active squares.\n\n2. **Center Control**: The knight on f3 helps control the central squares e5 and d4, which are important in chess. Controlling the center gives you more options and space for your pieces.\n\n3. **King Safety**: By developing the knight, you're also preparing to castle kingside, which will keep your king safe.\n\n### Opening Principles for Beginners\n- **Control the center** with pawns (e4, d4) and pieces\n- **Develop knights before bishops**\n- **Castle early** to keep your king safe\n- **Don't move the same piece twice** in the opening without a good reason\n\nKeep developing your pieces and following these opening principles!"
 }
 ```
 
-### Chess Position Analysis (Direct Engine Access)
+### Test Endpoint
 
 ```
-POST /api/analyze
+GET /api/test
 ```
 
-Direct access to the chess engine via chess-api.com.
-
-**Request Body:**
-```json
-{
-  "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-  "depth": 15,
-  "variants": 3,
-  "maxThinkingTime": 50
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "eval": 0.25,
-  "bestMove": "e2e4",
-  "san": "e4",
-  "text": "Move e2 → e4: [+0.25]. White is slightly better.",
-  "winChance": 53.65,
-  "depth": 15,
-  "mate": null,
-  "continuation": ["e2e4", "e7e5", "g1f3"]
-}
-```
-
-### Tool-Based Analysis
-
-```
-GET /api/analyze-with-tool?fen={fen}&depth={depth}
-```
-
-Uses the Spring AI tool to analyze a position and return a natural language explanation.
+Simple health check endpoint that returns "This is a test".
 
 ## Data Models
 
-### UserInfo (Structured Output)
+### CoachingResult (Main Response)
+```kotlin
+data class CoachingResult(
+    val bestMove: String?,      // Recommended move in standard algebraic notation
+    val advice: String          // Comprehensive coaching explanation
+)
+```
+
+### UserInfo (Vision Analysis)
 ```kotlin
 data class UserInfo(
-    val color: String?, // "White", "Black", or "Uncertain"
-    val elo: Int?, // null if uncertain
-    val colorConfidence: String? = null, // "high", "medium", "low"
-    val eloConfidence: String? = null // "high", "medium", "low"
+    val color: String?,         // "White", "Black", or "Uncertain"
+    val elo: Int?,             // Player's ELO rating or null if uncertain
+    val colorConfidence: String?, // "High", "Medium", "Low"
+    val eloConfidence: String?    // "High", "Medium", "Low"
 )
 ```
 
-### FenAnalysis (Structured Output)
-```kotlin
-data class FenAnalysis(
-    val fen: String,
-    val isValid: Boolean,
-    val errors: List<String> = emptyList(),
-    val moveNumber: Int? = null,
-    val activeColor: String? = null, // "w" or "b"
-    val castlingRights: String? = null // "KQkq", partial, or "-"
-)
-```
-
-### CoachingAdvice (Structured Output)
-```kotlin
-data class CoachingAdvice(
-    val suggestedMove: String,
-    val explanation: String,
-    val reasoning: String,
-    val difficulty: String, // "beginner", "intermediate", "advanced"
-    val confidence: String // "high", "medium", "low"
-)
-```
-
-### ChessApiResponse (Enhanced Error Handling)
+### ChessApiResponse (Engine Integration)
 ```kotlin
 data class ChessApiResponse(
-    val success: Boolean,
-    val eval: Double,
-    val move: String?, // Now nullable to handle API inconsistencies
-    val san: String?,
-    val text: String,
-    val winChance: Double?,
-    val depth: Int?,
-    val mate: Int?,
-    val continuationArr: List<String>?
+    val text: String,           // Engine analysis description
+    val eval: Double,           // Position evaluation score
+    val move: String?,          // Best move in coordinate notation
+    val fen: String?,           // Position in FEN notation
+    val depth: Int?,            // Analysis depth used
+    val winChance: Double?,     // Win probability percentage
+    val continuationArr: List<String>?, // Continuation moves
+    val mate: Int?,             // Mate in X moves (if applicable)
+    val san: String?,           // Best move in algebraic notation
+    val turn: String?           // Whose turn ("w" or "b")
 )
 ```
 
 ## Spring AI Integration
 
-### Tool Calling
-The `ChessApiTool` class uses Spring AI's `@Tool` annotation to enable automatic function calling:
+### Tool Configuration
+The application uses explicit bean configuration to avoid tool registration conflicts:
 
 ```kotlin
-@Tool(description = "Analyze a chess position using Stockfish engine via chess-api.com")
-fun analyzePosition(
-    @ToolParam(description = "FEN notation of the chess position") 
-    fen: String,
+@Configuration
+class ToolConfiguration {
+    @Bean
+    fun chessApiTool(): ChessApiTool {
+        return ChessApiTool()
+    }
+}
+```
+
+### Chess Analysis Tool
+The `ChessApiTool` class provides chess engine integration:
+
+```kotlin
+@Tool(description = "Analyze a chess position from a sequence of moves using Stockfish engine")
+fun analyzeFromMoves(
+    @ToolParam(description = "Sequence of moves in standard algebraic notation") 
+    moves: String,
     @ToolParam(description = "Analysis depth (max: 18, default: 12)")
-    depth: Int = 12
+    depth: Int = 12,
+    @ToolParam(description = "Number of variants to consider (max: 5, default: 1)")
+    variants: Int = 1,
+    @ToolParam(description = "Maximum thinking time in ms (max: 100, default: 50)")
+    maxThinkingTime: Int = 50
 ): String
 ```
 
-### Structured Outputs
-The service uses Spring AI's structured output capabilities to ensure reliable data parsing:
+### Structured Output Integration
+The service uses Spring AI's structured output capabilities for reliable response parsing:
 
 ```kotlin
-// Example usage
-val result = chatClient.prompt()
-    .user(promptText)
-    .options(options)
+val result = clientWithTool.prompt()
+    .system(systemPrompt)
+    .user(userPrompt)
     .call()
-    .entity(UserInfo::class.java)
+    .entity(CoachingResult::class.java)
 ```
+
+### Enhanced Prompting System
+- **Comprehensive System Prompts**: Define coaching principles, chess education guidelines, and analysis requirements
+- **Detailed User Prompts**: Specify analysis requirements and educational objectives
+- **Structured Output Instructions**: Ensure consistent response format with both move recommendations and advice
 
 ## Configuration
 
-### Dependencies
-- Spring AI 1.0.0-RC1
-- Spring Boot 3.4.5
-- Spring WebFlux (for reactive WebClient)
-- Jackson Kotlin Module
-- Kotlin 1.9.25
-
 ### Environment Variables
-Set the following environment variables:
-- `OPENAI_API_KEY`: Your OpenAI API key for GPT-4o
-- `CHESS_API_URL`: chess-api.com base URL (optional, defaults to https://chess-api.com/v1)
+- `OPENAI_API_KEY`: OpenAI API key for GPT-4 integration
 
-## Testing
-
-The project includes comprehensive tests for:
-- Structured output data models
-- ELO-based analysis depth logic
-- User categorization and skill level determination
-- Game phase detection (opening, middlegame, endgame)
-- FEN validation and override mechanisms
-- Integration with chess-api.com (disabled by default)
-
-Run tests with:
-```bash
-./gradlew test
+### Application Properties
+```properties
+spring.servlet.multipart.max-file-size=10MB
+spring.servlet.multipart.max-request-size=10MB
 ```
 
-## Error Handling & Resilience
+## Dependencies
 
-### FEN Validation
-- AI-based FEN analysis with structured outputs
-- Basic validation override for incorrectly marked invalid FENs
-- Detailed error reporting for genuinely invalid positions
+### Core Dependencies
+- Spring Boot 3.4.5
+- Spring AI with OpenAI integration
+- Kotlin coroutines support
+- Jackson for JSON processing
 
-### Chess API Resilience
-- Nullable field handling for inconsistent API responses
-- Fallback text parsing when JSON parsing fails
-- Graceful degradation to game-phase appropriate advice
+### Key Spring AI Features Used
+- ChatClient with tool integration
+- Structured output with entity conversion
+- Vision capabilities for screenshot analysis
+- Tool calling with automatic function discovery
 
-### Coaching Fallbacks
-- **Very Low ELO (<600)**: Game-phase specific advice without complex engine analysis
-- **Engine Failure**: Tool-based analysis with AI reasoning
-- **Complete Failure**: Structured advice based on basic chess principles
+## Architecture Benefits
 
-## Usage Example
+### Maintainable Design
+- **Separation of Concerns**: Clear separation between web layer, business logic, and external integrations
+- **Dependency Injection**: Spring manages all component lifecycles and dependencies
+- **Configuration Management**: Centralized tool and service configuration
 
-```kotlin
-// Inject the service
-@Autowired
-private lateinit var chessCoachingService: ChessCoachingService
+### Scalable AI Integration
+- **Tool-Based Architecture**: AI decides when and how to use chess analysis
+- **Structured Outputs**: Reliable data parsing and response formatting
+- **Adaptive Analysis**: ELO-based depth adjustment for appropriate complexity
 
-// Analyze a position
-val advice = chessCoachingService.analyzePosition(screenshot, "e4 e5 Nf3 Nc6")
-```
-
-The service will:
-1. Extract user ELO and color from the screenshot
-2. Convert moves to valid FEN notation
-3. Determine appropriate analysis depth based on ELO
-4. Get engine analysis from chess-api.com
-5. Generate personalized coaching advice based on game phase
-6. Format the response for the user's skill level
-
-## Recent Improvements
-
-### ✅ **Fixed Issues**
-- **FEN Validation**: Added override mechanism for AI incorrectly marking valid FENs as invalid
-- **Chess API Endpoint**: Fixed 404 error by using correct endpoint `POST /v1` instead of `/v1/analyze`
-- **Chess API Errors**: Made response fields nullable and added fallback parsing
-- **Game Phase Awareness**: Coaching now adapts to opening/middlegame/endgame
-- **Low ELO Coaching**: Specialized advice for very low ELO players (under 600)
-
-### ✅ **Enhanced Features**
-- **Piece Count Detection**: Automatically detects game phase based on remaining pieces
-- **Move Number Awareness**: Uses move number to determine appropriate coaching style
-- **Robust Error Recovery**: Multiple fallback layers ensure coaching always provides value
-- **Context-Appropriate Advice**: No more opening advice in endgames! 
+### User Experience
+- **Comprehensive Coaching**: Multiple strategic concepts explained per response
+- **Educational Focus**: Skill-level appropriate explanations with chess terminology
+- **Consistent Performance**: Fixed tool conflicts ensure reliable operation 

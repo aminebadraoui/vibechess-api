@@ -869,6 +869,114 @@ class ChessCoachingService(
 - Type-safe tool definitions
 - Integration with external APIs
 
+### **4. Tool Configuration Management**
+
+**Important: Avoiding Tool Registration Conflicts**
+
+When using Spring AI tools, you may encounter "Multiple tools with the same name" errors. This happens when tools are registered multiple times through different mechanisms.
+
+**Problem**: Spring AI uses both automatic discovery (`@Component`) and explicit registration (`.defaultTools()`):
+
+```kotlin
+// ❌ This causes duplicate registration
+@Component  // ← Spring automatically discovers this
+class ChessApiTool {
+    @Tool
+    fun analyzeFromMoves(...): String { ... }
+}
+
+@Service
+class ChessCoachingService(builder: ChatClient.Builder, chessApiTool: ChessApiTool) {
+    private val clientWithTool = builder
+        .defaultTools(chessApiTool)  // ← Explicitly registered again!
+        .build()
+}
+```
+
+**Solution**: Use explicit bean configuration without `@Component`:
+
+```kotlin
+// ✅ Configuration class manages tool registration
+@Configuration
+class ToolConfiguration {
+    
+    @Bean
+    fun chessApiTool(): ChessApiTool {
+        return ChessApiTool()
+    }
+}
+
+// ✅ Tool class without @Component annotation
+class ChessApiTool {
+    @Tool(description = "Analyze chess position from moves using Stockfish engine")
+    fun analyzeFromMoves(
+        @ToolParam(description = "Sequence of moves in standard algebraic notation") 
+        moves: String,
+        @ToolParam(description = "Analysis depth (max: 18, default: 12)")
+        depth: Int = 12
+    ): String {
+        // Tool implementation
+    }
+}
+
+// ✅ Service uses tool without conflicts
+@Service
+class ChessCoachingService(
+    private val builder: ChatClient.Builder,
+    private val chessApiTool: ChessApiTool
+) {
+    private val clientWithTool = builder
+        .defaultTools(chessApiTool)  // Only registration path
+        .build()
+}
+```
+
+**Key Points:**
+- Remove `@Component` from tool classes
+- Use explicit `@Bean` configuration
+- Only register tools through `.defaultTools()` OR automatic discovery, not both
+- This ensures consistent tool availability across multiple requests
+
+### **5. Application Configuration Properties**
+
+```kotlin
+@ConfigurationProperties(prefix = "chess.coaching")
+@ConstructorBinding
+data class ChessCoachingProperties(
+    val maxAnalysisDepth: Int = 18,
+    val defaultDepth: Int = 12,
+    val beginnerDepth: Int = 8,
+    val advancedDepth: Int = 15,
+    val eloThresholds: EloThresholds = EloThresholds()
+)
+
+data class EloThresholds(
+    val beginner: Int = 800,
+    val intermediate: Int = 1200,
+    val advanced: Int = 1600,
+    val expert: Int = 2000
+)
+
+@Service
+class ChessCoachingService(
+    private val properties: ChessCoachingProperties,
+    private val builder: ChatClient.Builder,
+    private val chessApiTool: ChessApiTool
+) {
+    
+    private fun determineAnalysisDepth(elo: Int?): Int {
+        return when {
+            elo == null -> properties.defaultDepth
+            elo < properties.eloThresholds.beginner -> properties.beginnerDepth
+            elo < properties.eloThresholds.intermediate -> properties.defaultDepth
+            elo < properties.eloThresholds.advanced -> properties.defaultDepth
+            elo < properties.eloThresholds.expert -> properties.advancedDepth
+            else -> properties.maxAnalysisDepth
+        }
+    }
+}
+```
+
 ---
 
 ## ♟️ **Building the Chess API**
@@ -897,103 +1005,211 @@ class ChessCoachingService(
 ### **2. Request Flow**
 
 ```kotlin
-// 1. Controller receives request
+// 1. Controller receives request and returns structured response
 @PostMapping("/coach")
 suspend fun getCoaching(
     @RequestPart("screenshot") screenshot: MultipartFile,
     @RequestPart("moves") moves: String
 ): CoachingResponse {
-    val advice = chessCoachingService.analyzePosition(screenshot, moves)
-    return CoachingResponse(advice = advice ?: "No response from AI")
+    val result = chessCoachingService.analyzePosition(screenshot, moves)
+    return CoachingResponse(
+        bestMove = result.bestMove,
+        advice = result.advice
+    )
 }
 
-// 2. Service orchestrates the analysis
-suspend fun analyzePosition(screenshot: MultipartFile, moves: String): String? {
+// 2. Service uses structured output to get comprehensive coaching
+suspend fun analyzePosition(screenshot: MultipartFile, moves: String): CoachingResult {
     // Extract user info from screenshot
     val userInfo = getUserInfoStructured(screenshot)
     
     // Determine analysis depth based on skill
-    val depth = determineAnalysisDepth(userInfo.elo)
+    val analysisDepth = determineAnalysisDepth(userInfo.elo)
     
-    // Get chess engine analysis
-    val engineAnalysis = chessApiTool.getAnalysisResponseFromMoves(
-        moves = moves,
-        depth = depth,
-        variants = if (userInfo.elo != null && userInfo.elo > 1500) 3 else 1
+    // Calculate move number for coaching context
+    val moveNumber = extractMoveNumber(moves)
+    
+    // Use AI with chess analysis tool to get structured coaching result
+    val result = clientWithTool.prompt()
+        .system(comprehensiveSystemPrompt)
+        .user(detailedUserPrompt)
+        .call()
+        .entity(CoachingResult::class.java)
+    
+    return result ?: CoachingResult(
+        bestMove = null,
+        advice = generateBasicAdvice(userInfo, moves, moveNumber)
     )
-    
-    // Generate AI coaching advice
-    val advice = generateStructuredCoachingAdvice(userInfo, engineAnalysis)
-    
-    return formatFinalCoachingMessage(advice, userInfo)
 }
 
-// 3. Tool integrates with chess engine
-@Description("Analyze chess moves and get the best continuation")
-fun getAnalysisResponseFromMoves(
+// 3. Tool provides chess engine integration automatically when AI needs it
+@Tool(description = "Analyze a chess position from a sequence of moves using Stockfish engine")
+fun analyzeFromMoves(
+    @ToolParam(description = "Sequence of moves in standard algebraic notation") 
     moves: String,
+    @ToolParam(description = "Analysis depth (max: 18, default: 12)")
     depth: Int = 12,
+    @ToolParam(description = "Number of variants to consider (max: 5, default: 1)")
     variants: Int = 1,
+    @ToolParam(description = "Maximum thinking time in ms (max: 100, default: 50)")
     maxThinkingTime: Int = 50
-): ChessApiResponse? {
-    // Convert moves to position
-    val position = convertMovesToPosition(moves)
-    
-    // Call external chess engine
-    val analysis = chessEngine.analyze(position, depth, variants, maxThinkingTime)
-    
-    return ChessApiResponse(
-        text = analysis.summary,
-        eval = analysis.evaluation,
-        move = analysis.bestMove,
-        san = analysis.algebraicNotation,
-        depth = depth,
-        winChance = analysis.winProbability
+): String {
+    // Convert moves to chess engine analysis
+    val requestBody = mapOf(
+        "input" to moves,
+        "depth" to depth,
+        "variants" to variants,
+        "maxThinkingTime" to maxThinkingTime
     )
+    
+    val response = webClient.post()
+        .body(BodyInserters.fromValue(requestBody))
+        .retrieve()
+        .bodyToMono(String::class.java)
+        .block()
+    
+    val chessResponse = objectMapper.readValue<ChessApiResponse>(response)
+    
+    return """
+    Analysis Result:
+    Evaluation: ${chessResponse.eval} (negative means Black is winning)
+    Best Move: ${chessResponse.san ?: chessResponse.move}
+    Move Description: ${chessResponse.text}
+    Depth: ${chessResponse.depth}
+    Win Chance: ${chessResponse.winChance}%
+    Position FEN: ${chessResponse.fen}
+    Turn: ${if (chessResponse.turn == "w") "White" else "Black"} to move
+    ${if (chessResponse.mate != null) "Mate in: ${chessResponse.mate}" else ""}
+    """.trimIndent()
 }
+
+// 4. Structured output data models
+data class CoachingResult(
+    val bestMove: String?,      // Recommended move in algebraic notation
+    val advice: String          // Comprehensive coaching explanation
+)
+
+data class CoachingResponse(
+    val bestMove: String?,
+    val advice: String
+)
 ```
 
 ### **3. Error Handling Strategy**
 
 ```kotlin
-suspend fun analyzePosition(screenshot: MultipartFile, moves: String): String? {
+suspend fun analyzePosition(screenshot: MultipartFile, moves: String): CoachingResult {
     return try {
-        // Main analysis logic
+        // Main structured output analysis
         val userInfo = getUserInfoStructured(screenshot)
-        val engineAnalysis = chessApiTool.getAnalysisResponseFromMoves(moves)
-        generateAdvice(userInfo, engineAnalysis)
+        val analysisDepth = determineAnalysisDepth(userInfo.elo)
+        val moveNumber = extractMoveNumber(moves)
+        
+        // Comprehensive system and user prompts
+        val systemPrompt = createComprehensiveSystemPrompt()
+        val userPrompt = createDetailedUserPrompt(userInfo, moves, analysisDepth, moveNumber)
+        
+        // Get structured coaching result from AI with tool integration
+        val result = clientWithTool.prompt()
+            .system(systemPrompt)
+            .user(userPrompt)
+            .call()
+            .entity(CoachingResult::class.java)
+        
+        result ?: CoachingResult(
+            bestMove = null,
+            advice = generateBasicAdvice(userInfo, moves, moveNumber)
+        )
         
     } catch (e: OpenAIException) {
         log.error("OpenAI API error: ${e.message}", e)
-        generateFallbackAdvice("OpenAI service temporarily unavailable")
+        CoachingResult(
+            bestMove = null,
+            advice = generateFallbackAdvice("OpenAI service temporarily unavailable", moves)
+        )
         
-    } catch (e: ChessEngineException) {
-        log.error("Chess engine error: ${e.message}", e)
-        generateFallbackAdvice("Chess analysis temporarily unavailable")
+    } catch (e: JsonProcessingException) {
+        log.error("Structured output parsing error: ${e.message}", e)
+        CoachingResult(
+            bestMove = null,
+            advice = generateFallbackAdvice("Response formatting issue", moves)
+        )
         
     } catch (e: IllegalArgumentException) {
         log.error("Invalid input: ${e.message}", e)
-        "Please check your move notation and try again."
+        CoachingResult(
+            bestMove = null,
+            advice = "Please check your move notation and try again. Moves should be in standard algebraic notation (e.g., 'e4 e5 Nf3')."
+        )
         
     } catch (e: Exception) {
         log.error("Unexpected error: ${e.message}", e)
-        generateGenericAdvice()
+        CoachingResult(
+            bestMove = null,
+            advice = generateGenericAdvice(moves)
+        )
     }
 }
 
-private fun generateFallbackAdvice(reason: String): String {
+private fun generateFallbackAdvice(reason: String, moves: String): String {
+    val moveNumber = extractMoveNumber(moves)
+    
+    return when {
+        moveNumber <= 10 -> """
+            I'm having trouble with detailed analysis right now ($reason), 
+            but here are key opening principles:
+            
+            • **Control the center** with pawns (e4, d4) and pieces
+            • **Develop knights before bishops** - knights are more flexible early
+            • **Castle early** to keep your king safe
+            • **Don't move the same piece twice** without good reason
+            
+            Try again in a few moments for detailed position analysis!
+        """.trimIndent()
+        
+        moveNumber <= 25 -> """
+            I'm having trouble with detailed analysis right now ($reason), 
+            but here are middlegame principles:
+            
+            • **Look for tactical opportunities** - forks, pins, skewers
+            • **Improve your worst-placed piece** - find better squares
+            • **Create threats** while maintaining piece safety
+            • **Control key squares** and outposts
+            
+            Try again in a few moments for detailed position analysis!
+        """.trimIndent()
+        
+        else -> """
+            I'm having trouble with detailed analysis right now ($reason), 
+            but here are endgame principles:
+            
+            • **Activate your king** - it's a strong piece in the endgame
+            • **Push passed pawns** toward promotion
+            • **Stop opponent's dangerous pawns** with your pieces
+            • **Use your pieces actively** - centralize and coordinate
+            
+            Try again in a few moments for detailed position analysis!
+        """.trimIndent()
+    }
+}
+
+private fun generateGenericAdvice(moves: String): String {
+    val moveNumber = extractMoveNumber(moves)
+    val gamePhase = when {
+        moveNumber <= 10 -> "opening"
+        moveNumber <= 25 -> "middlegame"
+        else -> "endgame"
+    }
+    
     return """
-        I'm having trouble with detailed analysis right now ($reason), 
-        but here are some general chess principles:
+        I'm experiencing technical difficulties with position analysis, but I can offer some general $gamePhase advice:
         
-        • In the opening: Control the center, develop pieces, castle early
-        • In the middlegame: Look for tactics, improve piece positions
-        • In the endgame: Activate your king, push passed pawns
+        Keep focusing on fundamental chess principles, calculate your moves carefully, 
+        and look for your opponent's threats. Every position offers learning opportunities!
         
-        Try again in a few moments for detailed position analysis!
+        Please try again shortly for detailed analysis.
     """.trimIndent()
 }
-```
 
 ### **4. Configuration Management**
 
@@ -1667,10 +1883,10 @@ data class EngineConfig(
 @Service
 class ChessCoachingService(
     private val config: ChessCoachingConfig,
-    private val chatClientBuilder: ChatClient.Builder
+    private val builder: ChatClient.Builder
 ) {
     
-    private val chatClient = chatClientBuilder
+    private val chatClient = builder
         .defaultOptions(OpenAiChatOptions.builder()
             .model(config.ai.model)
             .temperature(config.ai.temperature.toFloat())
@@ -1893,28 +2109,169 @@ class CoachingMetrics {
 
 ---
 
-## 🎯 **Summary**
+## 🎯 **Current Application State & Key Improvements**
 
-This tutorial covered:
+### **✅ Final Architecture Overview**
 
-✅ **Spring Boot fundamentals** - Configuration, auto-configuration, web development  
-✅ **Kotlin integration** - Data classes, coroutines, null safety, Spring-specific features  
-✅ **Spring AI capabilities** - Chat clients, vision AI, structured output, function calling  
-✅ **Real-world application** - Chess coaching API with complex business logic  
-✅ **Production considerations** - Testing, deployment, monitoring, security  
-✅ **Best practices** - Error handling, configuration management, performance optimization  
+Our chess coaching API has evolved into a sophisticated, production-ready application with the following architecture:
 
-**Key Takeaways:**
-- Spring Boot + Kotlin = Powerful, concise web applications
-- Spring AI simplifies AI integration with type safety
-- Structured output eliminates manual JSON parsing
-- Function calling enables AI to use external tools
-- Proper error handling and monitoring are crucial for production
+```
+┌─────────────────────────────────────────────────────┐
+│                🌐 REST API LAYER                     │
+│  ChessCoachingController → CoachingResponse         │
+│  (bestMove + advice)                                │
+└─────────────────────────────────────────────────────┘
+                            ↕️
+┌─────────────────────────────────────────────────────┐
+│                ⚙️ BUSINESS LAYER                     │
+│  ChessCoachingService → CoachingResult              │
+│  (Structured Output + Tool Integration)             │
+└─────────────────────────────────────────────────────┘
+                            ↕️
+┌─────────────────────────────────────────────────────┐
+│                🔧 TOOL LAYER                        │
+│  ChessApiTool → Chess Engine Analysis               │
+│  (Automatic AI Integration)                         │
+└─────────────────────────────────────────────────────┘
+```
 
-**Next Steps:**
-- Experiment with different AI models and prompts
-- Add more sophisticated chess analysis features
-- Implement real-time coaching with WebSockets
-- Scale the application with microservices architecture
+### **🚀 Key Features Implemented**
 
-**Happy coding! ♟️🚀** 
+#### **1. Structured Output Integration**
+- **Before**: Manual text parsing and move extraction
+- **After**: Spring AI structured outputs with `CoachingResult`
+- **Benefit**: Reliable data format, type safety, consistent responses
+
+```kotlin
+// Current approach - Clean and reliable
+val result = clientWithTool.prompt()
+    .system(systemPrompt)
+    .user(userPrompt)
+    .call()
+    .entity(CoachingResult::class.java)
+
+return CoachingResponse(
+    bestMove = result.bestMove,
+    advice = result.advice
+)
+```
+
+#### **2. Tool Registration Conflict Resolution**
+- **Problem**: "Multiple tools with the same name" errors
+- **Root Cause**: Dual registration via `@Component` and `.defaultTools()`
+- **Solution**: Explicit bean configuration with `ToolConfiguration`
+- **Result**: Consistent tool availability across all requests
+
+```kotlin
+// Fixed configuration approach
+@Configuration
+class ToolConfiguration {
+    @Bean
+    fun chessApiTool(): ChessApiTool {
+        return ChessApiTool()
+    }
+}
+
+// Clean tool class without @Component
+class ChessApiTool {
+    @Tool(description = "Analyze chess position from moves using Stockfish engine")
+    fun analyzeFromMoves(
+        @ToolParam(description = "Sequence of moves in standard algebraic notation") 
+        moves: String,
+        @ToolParam(description = "Analysis depth (max: 18, default: 12)")
+        depth: Int = 12
+    ): String {
+        // Tool implementation
+    }
+}
+```
+
+#### **3. Comprehensive AI Coaching**
+- **Enhanced Prompts**: Multi-section system prompts with coaching principles
+- **Educational Focus**: Multiple strategic concepts per response
+- **Skill-Level Adaptation**: ELO-based depth and explanation complexity
+- **Game Phase Awareness**: Opening/middlegame/endgame specific advice
+
+#### **4. Robust Error Handling**
+- **Structured Fallbacks**: All errors return `CoachingResult` format
+- **Game Phase Fallbacks**: Contextual advice based on move number
+- **Graceful Degradation**: Never fails completely, always provides value
+
+### **🎓 Spring AI Lessons Learned**
+
+#### **Tool Calling Best Practices**
+1. **Choose One Registration Method**: Either `@Component` OR explicit bean configuration
+2. **Use Descriptive Tool Names**: Help AI understand when to use tools
+3. **Handle Tool Failures**: Always provide fallback logic
+4. **Cache Tool Results**: Avoid redundant expensive calls
+
+#### **Structured Output Guidelines**
+1. **Make Fields Nullable**: Handle AI response variations gracefully
+2. **Provide Clear Instructions**: Explicit format requirements in prompts
+3. **Use Appropriate Data Types**: Match AI capabilities with Kotlin types
+4. **Validate Responses**: Always check for null results
+
+#### **Prompt Engineering Insights**
+1. **Separate System/User Prompts**: Clear role definition vs. specific requests
+2. **Be Specific About Format**: Explicit instructions for structured outputs
+3. **Provide Examples**: Help AI understand expected response patterns
+4. **Use Progressive Enhancement**: Basic → Advanced concepts based on user level
+
+### **🔧 Technical Architecture Benefits**
+
+#### **Maintainable Design**
+- **Single Responsibility**: Each class has one clear purpose
+- **Dependency Injection**: Spring manages all component lifecycles
+- **Configuration Management**: Centralized tool and service configuration
+- **Type Safety**: Kotlin's null safety prevents runtime errors
+
+#### **Scalable AI Integration**
+- **Tool-Based Architecture**: AI decides when/how to use chess analysis
+- **Adaptive Analysis**: ELO-based depth adjustment
+- **Structured Communication**: Reliable data flow between components
+
+#### **Production Ready Features**
+- **Error Recovery**: Multiple fallback layers
+- **Performance Optimization**: Appropriate analysis depth by skill level
+- **Consistent Responses**: Structured output ensures API reliability
+- **Educational Value**: Every response teaches chess concepts
+
+### **📊 Current API Response Example**
+
+```json
+{
+  "bestMove": "Nf3",
+  "advice": "Let's break down the current position and analyze it step by step, keeping in mind that you are a beginner with an ELO rating of 350.\n\n### Current Position Evaluation\n- **Score:** +0.25 (This indicates a roughly equal position with a slight advantage for White)\n- **Your Move Number:** 3\n- **Turn:** It's White's turn to move.\n\n### Best Move for White\nThe best move for you in this situation is **Nf3** (moving the knight from g1 to f3).\n\n### Why is Nf3 a Good Move?\n1. **Development**: Moving the knight to f3 helps to develop your pieces, which is crucial in the opening. Development means bringing your pieces out from their starting positions to more active squares.\n\n2. **Center Control**: The knight on f3 helps control the central squares e5 and d4, which are important in chess. Controlling the center gives you more options and space for your pieces.\n\n3. **King Safety**: By developing the knight, you're also preparing to castle kingside, which will keep your king safe.\n\n### Opening Principles for Beginners\n- **Control the center** with pawns (e4, d4) and pieces\n- **Develop knights before bishops**\n- **Castle early** to keep your king safe\n- **Don't move the same piece twice** in the opening without a good reason\n\nKeep developing your pieces and following these opening principles!"
+}
+```
+
+### **🎯 Next Steps for Enhancement**
+
+#### **Potential Improvements**
+1. **Opening Database Integration**: Identify specific openings by name
+2. **Game Analysis**: Analyze complete games for learning
+3. **Tactical Puzzle Generation**: Create custom puzzles from positions
+4. **Progress Tracking**: Track user improvement over time
+5. **Multiplayer Features**: Coach both sides of a game
+
+#### **Advanced Spring AI Features to Explore**
+1. **RAG Integration**: Add chess book knowledge base
+2. **Memory Management**: Remember user preferences and weaknesses
+3. **Multi-Modal Input**: Accept game notation files or board images
+4. **Streaming Responses**: Real-time coaching as moves are played
+
+### **🏆 Project Success Metrics**
+
+This tutorial successfully demonstrates:
+- ✅ **Spring Boot** fundamentals with real-world application
+- ✅ **Kotlin** integration with Spring ecosystem
+- ✅ **Spring AI** advanced features (tools, structured output, prompting)
+- ✅ **Production-ready** error handling and configuration
+- ✅ **Educational value** with comprehensive chess coaching
+- ✅ **Problem-solving** approach to complex integration challenges
+
+**You now have a fully functional, production-ready chess coaching API that showcases modern Spring development practices with AI integration!**
+
+---
+
+## 📚 **Additional Resources** 
